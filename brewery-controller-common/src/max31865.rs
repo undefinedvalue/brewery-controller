@@ -1,4 +1,4 @@
-//! The MAX31865 is a resistance-to-digital converter optimized for platinum
+//! The MAX31865 is a resistance-to-digital converter IC optimized for platinum
 //! RTDs (resistance temperature detectors). It can handle RTDs with 2-, 3-, or
 //! 4-wire interfaces and compensate for the resistance of the leads.
 //! 

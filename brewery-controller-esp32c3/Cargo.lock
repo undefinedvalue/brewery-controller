@@ -29,7 +29,6 @@ version = "0.0.0"
 dependencies = [
  "critical-section",
  "embedded-hal 1.0.0-alpha.9",
- "embedded-storage",
  "fugit",
  "libm",
  "log",
@@ -42,10 +41,8 @@ dependencies = [
  "brewery-controller-common",
  "critical-section",
  "embedded-hal 1.0.0-alpha.9",
- "embedded-storage",
  "esp-backtrace",
  "esp-println",
- "esp-storage",
  "esp32c3-hal",
  "log",
  "riscv 0.10.0",
@@ -136,12 +133,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "embedded-storage"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "156d7a2fdd98ebbf9ae579cbceca3058cff946e13f8e17b90e3511db0508c723"
-
-[[package]]
 name = "esp-backtrace"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -189,15 +180,6 @@ name = "esp-println"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adcfe5d532cf2029b11996cab6b4af948f41c24b131c76422115634711549aaa"
-
-[[package]]
-name = "esp-storage"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c39d2dfde1b5ee68c8380ec801afdce6fd242270b40ea4cf2e943abf6efa591e"
-dependencies = [
- "embedded-storage",
-]
 
 [[package]]
 name = "esp32c3"

@@ -3,12 +3,12 @@
         {
             "match": "\\.rs$",
             "name": "run",
-            "cmd": "pushd /home/anna/workspace/brewery-controller/brewery-controller-esp32c3 > /dev/null; cargo run; popd > /dev/null"
+            "cmd": "cargo run"
         }, 
         {
             "match": "\\.rs$",
             "name": "run-release",
-            "cmd": "pushd /home/anna/workspace/brewery-controller/brewery-controller-esp32c3 > /dev/null; cargo run --release; popd > /dev/null"
+            "cmd": "cargo run --release"
         }, 
         {
             "match": "\\.rs$",
