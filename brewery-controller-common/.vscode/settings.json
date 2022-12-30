@@ -1,0 +1,14 @@
+{
+    "runInTerminal.commands": [
+        {
+            "match": "\\.rs$",
+            "name": "stop",
+            "cmd": "\u0003"
+        },
+        {
+            "match": "\\.rs*$",
+            "name": "test",
+            "cmd": "cargo test"
+        },
+    ],
+}

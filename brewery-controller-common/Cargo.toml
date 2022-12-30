@@ -1,0 +1,18 @@
+[package]
+name = "brewery-controller-common"
+version = "0.0.0"
+authors = ["Anna"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+critical-section = "1.1.1"
+embedded-hal = { version = "=1.0.0-alpha.9" }
+embedded-storage = "0.3.0"
+fugit = "0.3.6"
+libm = "0.2.6"
+log = { version = "0.4.17" }
+
+
+[dev-dependencies]
+mockall = { version = "0.11.3", features = ["nightly"] }

@@ -1,0 +1,35 @@
+{
+    "folders": [
+        {
+            "path": "brewery-controller-esp32c3"
+        },
+        {
+            "path": "brewery-controller-common"
+        }
+    ],
+    "settings": {
+    "runInTerminal.commands": [
+        {
+            "match": "\\.rs$",
+            "name": "run",
+            "cmd": "pushd /home/anna/workspace/brewery-controller/brewery-controller-esp32c3 > /dev/null; cargo run; popd > /dev/null"
+        }, 
+        {
+            "match": "\\.rs$",
+            "name": "run-release",
+            "cmd": "pushd /home/anna/workspace/brewery-controller/brewery-controller-esp32c3 > /dev/null; cargo run --release; popd > /dev/null"
+        }, 
+        {
+            "match": "\\.rs$",
+            "name": "stop",
+            "cmd": "\u0003"
+        },
+        {
+            "match": "\\.rs*$",
+            "name": "test",
+            "cmd": "pushd /home/anna/workspace/brewery-controller/brewery-controller-common > /dev/null; cargo test; popd > /dev/null"
+        },
+    ],
+    "rust-analyzer.checkOnSave.allTargets": false,
+  },
+}
