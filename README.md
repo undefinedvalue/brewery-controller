@@ -12,8 +12,7 @@ The three 7-segment displays show:
 * A "power percent" integer value between 0 and 100, which can be changed using one of the rotary encoders.
 * A "target temperature" integer value between 70 and 212, which can be changed using the other rotary encoder.
 
-
-
+The binary is no_std, so it runs on the bare metal microcontroller.
 
 | Directory | Description |
 | --------- | ----------- |
