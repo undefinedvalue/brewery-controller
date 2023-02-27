@@ -1,10 +1,9 @@
 #![no_std]
 #![no_main]
 
-use core::{cell::RefCell, convert::Infallible};
+use core::convert::Infallible;
 
-use critical_section::Mutex;
-use embedded_hal::{i2c::I2c, digital::OutputPin};
+use embedded_hal::{i2c::I2c, digital::{OutputPin, InputPin}};
 use esp32c3_hal::{
     clock::Clocks,
     clock::ClockControl,
@@ -18,7 +17,7 @@ use esp32c3_hal::{
     systimer::SystemTimer,
     timer::TimerGroup,
     Delay, Rtc, IO,
-    gpio::{BankGpioRegisterAccess, Event, Bank0GpioRegisterAccess, SingleCoreInteruptStatusRegisterAccess, InteruptStatusRegisterAccess, DriveStrength},
+    gpio::DriveStrength,
 };
 use esp_backtrace as _;
 #[allow(unused_imports)]
@@ -52,25 +51,6 @@ const POWER_PERCENT_MAX: i32 = 100;
 const POWER_PERCENT_DEFAULT: i32 = POWER_PERCENT_MIN;
 
 const MAX31865_REFERENCE_RESISTANCE_OHMS: u32 = 4300;
-
-const TEMPERATURE_READY_MASK: u32 = 1 << 4;
-const IO_EXPANDER_READY_MASK: u32 = 1 << 3;
-const INTERRUPT_PIN_MASK: u32 = TEMPERATURE_READY_MASK | IO_EXPANDER_READY_MASK;
-static INTERRUPTS: Mutex<RefCell<u32>> = Mutex::new(RefCell::new(0));
-
-#[allow(non_snake_case)]
-#[interrupt]
-fn GPIO() {
-    critical_section::with(|cs| {
-        // Read which pins have interrupt flags set on them
-        let interrupts = SingleCoreInteruptStatusRegisterAccess::pro_cpu_interrupt_status_read();
-        
-        // Clear interrupts we care about
-        Bank0GpioRegisterAccess.write_interrupt_status_clear(INTERRUPT_PIN_MASK);
-    
-        INTERRUPTS.replace_with(cs, |v| *v | interrupts);
-    });
-}
 
 #[allow(non_snake_case)]
 #[riscv_rt::entry]
@@ -181,14 +161,9 @@ fn main() -> ! {
         ROTARY_DISPLAY_MAX_DEC_PLACES
     );
 
-    // Configure interrupts
-    let mut temperature_ready = io.pins.gpio4.into_pull_up_input();
-    temperature_ready.listen(Event::FallingEdge);
+    let temperature_ready = io.pins.gpio4.into_pull_up_input();
+    let io_expander_ready = io.pins.gpio3.into_pull_up_input();
     
-    let mut io_expander_ready = io.pins.gpio3.into_pull_up_input();
-    io_expander_ready.listen(Event::FallingEdge);
-    
-
     let mut target_temp_ssr_pin = io.pins.gpio5.into_push_pull_output();
     let mut power_percent_ssr_pin = io.pins.gpio9.into_push_pull_output();
     target_temp_ssr_pin.set_drive_strength(DriveStrength::I5mA);
@@ -202,6 +177,8 @@ fn main() -> ! {
     unsafe { riscv::interrupt::enable(); }
 
     let mut devices = Devices {
+        temperature_ready,
+        io_expander_ready,
         temperature_device,
         temperature_display,
         target_temp_rotary,
@@ -276,14 +253,18 @@ impl<SPI, I2CA, I2CB> From<Infallible> for DeviceError<SPI, I2CA, I2CB>
     }
 }
 
-struct Devices<T, D, I, S1, S2>
+struct Devices<TR, IR, T, D, I, S1, S2>
 where
+    TR: InputPin,
+    IR: InputPin,
     T: Max31865ReadWrite,
     D: SevenSegmentDisplayWrite,
     I: Mcp23008ReadWrite,
     S1: OutputPin,
     S2: OutputPin,
 {
+    temperature_ready: TR,
+    io_expander_ready: IR,
     temperature_device: T,
     temperature_display: D,
     target_temp_rotary: RotaryEncoder,
@@ -296,8 +277,10 @@ where
     run: u32,
 }
 
-impl<T, D, I, S1, S2, TErr, DErr, IErr> Devices<T, D, I, S1, S2>
+impl<TR, IR, T, D, I, S1, S2, TErr, DErr, IErr> Devices<TR, IR, T, D, I, S1, S2>
 where
+    TR: InputPin<Error = Infallible>,
+    IR: InputPin<Error = Infallible>,
     T: Max31865ReadWrite<Error = TErr>,
     D: SevenSegmentDisplayWrite<Error = DErr>,
     I: Mcp23008ReadWrite<Error = IErr>,
@@ -338,21 +321,12 @@ where
         self.run += 1;
 
         let mut stats = TemperatureStats::new();
-        let mut interrupts = 0u32;
 
         while self.run == 1 {
-            interrupts |= critical_section::with(|cs| {
-                INTERRUPTS.replace(cs, 0)
-            });
-
             self.target_temp_ssr.update();
             self.power_percent_ssr.update();
 
-            // Prioritize handling the IO expander because the rotary encoders
-            // need to be handled quickly to avoid skipping.
-            if interrupts & IO_EXPANDER_READY_MASK != 0 {
-                interrupts &= !IO_EXPANDER_READY_MASK;
-
+            if self.io_expander_ready.is_low()? {
                 let data = self.io_expander.read()?;
                 let now = Time.now();
                 
@@ -365,9 +339,9 @@ where
                     Self::show_value(&mut self.power_percent_rotary, &mut self.power_percent_display)?;
                     self.power_percent_ssr.set_power_percent(self.power_percent_rotary.value() as u32);
                 }
-            } else if interrupts & TEMPERATURE_READY_MASK != 0 {
-                interrupts &= !TEMPERATURE_READY_MASK;
-
+            }
+            
+            if self.temperature_ready.is_low()? {
                 let temp = self.temperature_device.read_temperature()?;
 
                 if stats.add_sample(temp) {
