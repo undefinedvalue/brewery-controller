@@ -7,6 +7,9 @@
 //! [MCP23008 Datasheet](https://cdn-shop.adafruit.com/datasheets/MCP23008.pdf)
 use embedded_hal::i2c::I2c;
 
+#[allow(unused_imports)]
+use log::{debug, error, info, trace, warn};
+
 // Whether a pin is input or output. 0 = output, 1 = input.
 const IODIR_REGISTER: u8 = 0x00;
 // All pins default to inputs
@@ -287,6 +290,9 @@ where
         // the states of the gpios at the time this read happens).
         let data = &mut [0u8; 3];
         self.i2c.write_read(self.address, &[INTF_REGISTER], data)?;
+
+        let x = data[2];
+        info!("{x}");
 
         Ok(Mcp23008Data {
             interrupts: data[0],

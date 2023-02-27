@@ -1,10 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::cell::RefCell;
+use core::{cell::RefCell, convert::Infallible};
 
 use critical_section::Mutex;
-use embedded_hal::i2c::I2c;
+use embedded_hal::{i2c::I2c, digital::OutputPin};
 use esp32c3_hal::{
     clock::Clocks,
     clock::ClockControl,
@@ -18,7 +18,7 @@ use esp32c3_hal::{
     systimer::SystemTimer,
     timer::TimerGroup,
     Delay, Rtc, IO,
-    gpio::{BankGpioRegisterAccess, Event, Bank0GpioRegisterAccess, SingleCoreInteruptStatusRegisterAccess, InteruptStatusRegisterAccess},
+    gpio::{BankGpioRegisterAccess, Event, Bank0GpioRegisterAccess, SingleCoreInteruptStatusRegisterAccess, InteruptStatusRegisterAccess, DriveStrength},
 };
 use esp_backtrace as _;
 #[allow(unused_imports)]
@@ -31,6 +31,7 @@ use brewery_controller_common::{
     mcp23008::{Mcp23008, Mcp23008ReadWrite, Pin, InterruptTrigger, Mcp23008Error},
     rotary_encoder::RotaryEncoder,
     seven_segment_display::{SevenSegmentDisplay, SevenSegmentDisplayWrite, DisplayError},
+    solid_state_relay::SolidStateRelay,
 };
 
 mod esp_logger;
@@ -155,8 +156,8 @@ fn main() -> ! {
     );
 
     let target_temp_rotary = RotaryEncoder::new(
-        Pin::GPIO0,
-        Pin::GPIO1,
+        Pin::GPIO3,
+        Pin::GPIO4,
         TARGET_TEMP_MIN,
         TARGET_TEMP_MAX,
         TARGET_TEMP_DEFAULT,
@@ -168,8 +169,8 @@ fn main() -> ! {
     );
 
     let power_percent_rotary = RotaryEncoder::new(
-        Pin::GPIO3,
-        Pin::GPIO4,
+        Pin::GPIO0,
+        Pin::GPIO1,
         POWER_PERCENT_MIN,
         POWER_PERCENT_MAX,
         POWER_PERCENT_DEFAULT,
@@ -187,6 +188,15 @@ fn main() -> ! {
     let mut io_expander_ready = io.pins.gpio3.into_pull_up_input();
     io_expander_ready.listen(Event::FallingEdge);
     
+
+    let mut target_temp_ssr_pin = io.pins.gpio5.into_push_pull_output();
+    let mut power_percent_ssr_pin = io.pins.gpio9.into_push_pull_output();
+    target_temp_ssr_pin.set_drive_strength(DriveStrength::I5mA);
+    power_percent_ssr_pin.set_drive_strength(DriveStrength::I5mA);
+  
+    let target_temp_ssr = SolidStateRelay::new(target_temp_ssr_pin, Time);
+    let power_percent_ssr = SolidStateRelay::new(power_percent_ssr_pin, Time);
+  
     interrupt::enable(pac::Interrupt::GPIO, interrupt::Priority::Priority3).unwrap();
 
     unsafe { riscv::interrupt::enable(); }
@@ -196,8 +206,10 @@ fn main() -> ! {
         temperature_display,
         target_temp_rotary,
         target_temp_display,
+        target_temp_ssr,
         power_percent_rotary,
         power_percent_display,
+        power_percent_ssr,
         io_expander,
         run: 0,
     };
@@ -257,24 +269,45 @@ impl<SPI, I2CA, I2CB> From<Mcp23008Error<I2CB>> for DeviceError<SPI, I2CA, I2CB>
     }
 }
 
-struct Devices<T: Max31865ReadWrite, D: SevenSegmentDisplayWrite, I: Mcp23008ReadWrite> {
+impl<SPI, I2CA, I2CB> From<Infallible> for DeviceError<SPI, I2CA, I2CB>
+{
+    fn from(_: Infallible) -> DeviceError<SPI, I2CA, I2CB> {
+        unreachable!()
+    }
+}
+
+struct Devices<T, D, I, S1, S2>
+where
+    T: Max31865ReadWrite,
+    D: SevenSegmentDisplayWrite,
+    I: Mcp23008ReadWrite,
+    S1: OutputPin,
+    S2: OutputPin,
+{
     temperature_device: T,
     temperature_display: D,
     target_temp_rotary: RotaryEncoder,
     target_temp_display: D,
+    target_temp_ssr: SolidStateRelay<S1, Time>,
     power_percent_rotary: RotaryEncoder,
     power_percent_display: D,
+    power_percent_ssr: SolidStateRelay<S2, Time>,
     io_expander: I,
     run: u32,
 }
 
-impl<T, D, I, TErr, DErr, IErr> Devices<T, D, I>
+impl<T, D, I, S1, S2, TErr, DErr, IErr> Devices<T, D, I, S1, S2>
 where
     T: Max31865ReadWrite<Error = TErr>,
     D: SevenSegmentDisplayWrite<Error = DErr>,
     I: Mcp23008ReadWrite<Error = IErr>,
+    S1: OutputPin<Error = Infallible>,
+    S2: OutputPin<Error = Infallible>,
 {
     fn initialize(&mut self, clocks: &Clocks) -> Result<(), DeviceError<TErr, DErr, IErr>> {
+        self.target_temp_ssr.initialize();
+        self.power_percent_ssr.initialize();
+
         self.temperature_device.initialize(&mut Delay::new(clocks))?;
         self.temperature_device.start_auto_conversions()?;
         
@@ -312,6 +345,9 @@ where
                 INTERRUPTS.replace(cs, 0)
             });
 
+            self.target_temp_ssr.update();
+            self.power_percent_ssr.update();
+
             // Prioritize handling the IO expander because the rotary encoders
             // need to be handled quickly to avoid skipping.
             if interrupts & IO_EXPANDER_READY_MASK != 0 {
@@ -322,10 +358,12 @@ where
                 
                 if self.target_temp_rotary.update(data, now) {
                     Self::show_value(&mut self.target_temp_rotary, &mut self.target_temp_display)?;
+                    //self.target_temp_ssr.set_power_percent(self.target_temp_rotary.value() as u32);
                 }
             
                 if self.power_percent_rotary.update(data, now) {
                     Self::show_value(&mut self.power_percent_rotary, &mut self.power_percent_display)?;
+                    self.power_percent_ssr.set_power_percent(self.power_percent_rotary.value() as u32);
                 }
             } else if interrupts & TEMPERATURE_READY_MASK != 0 {
                 interrupts &= !TEMPERATURE_READY_MASK;
@@ -358,7 +396,10 @@ where
         self.run += 1;
     }
 
-    fn turn_off_normal(&mut self) {
+    fn turn_off_normal(mut self) {
+        self.target_temp_ssr.turn_off();
+        self.power_percent_ssr.turn_off();
+
         // Ignore errors while turning the display off
         self.temperature_display.set_display_on(false).unwrap_or_default();
         
@@ -368,7 +409,10 @@ where
         self.power_percent_display.set_display_on(false).unwrap_or_default();
     }
 
-    fn turn_off_error(&mut self) {
+    fn turn_off_error(mut self) {
+        self.target_temp_ssr.turn_off();
+        self.power_percent_ssr.turn_off();
+
         // Ignore errors while displaying. Hopefully one of the displays works.
         self.temperature_display.display_str("Err").unwrap_or_default();
         

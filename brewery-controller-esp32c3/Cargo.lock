@@ -42,11 +42,11 @@ dependencies = [
  "critical-section",
  "embedded-hal 1.0.0-alpha.9",
  "esp-backtrace",
- "esp-println",
+ "esp-println 0.4.0",
  "esp32c3-hal",
  "log",
  "riscv 0.10.0",
- "riscv-rt",
+ "riscv-rt 0.11.0",
  "shared-bus",
 ]
 
@@ -134,12 +134,11 @@ dependencies = [
 
 [[package]]
 name = "esp-backtrace"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1834d20d58dc6baaf063924cb3ffa0b7f6388a593bae310c9f228c4bd47f0dde"
+checksum = "e57b6eded586c6539146fd2511d13ca120e4d5e4d7eb56b69da6ae8e76b748ff"
 dependencies = [
- "esp-println",
- "riscv 0.10.0",
+ "esp-println 0.3.1",
 ]
 
 [[package]]
@@ -182,6 +181,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "adcfe5d532cf2029b11996cab6b4af948f41c24b131c76422115634711549aaa"
 
 [[package]]
+name = "esp-println"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c33a9d1eb60882ec910021bda7b67ce789dd0d6325b886e6739ef9d8f495ae22"
+
+[[package]]
 name = "esp32c3"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -189,7 +194,7 @@ checksum = "677b6cc003e2f7384c5bd02286e5ee04d9ac0adc875abff6c3316175af20eaa8"
 dependencies = [
  "critical-section",
  "riscv 0.10.0",
- "riscv-rt",
+ "riscv-rt 0.10.0",
  "vcell",
 ]
 
@@ -205,7 +210,7 @@ dependencies = [
  "esp-hal-common",
  "r0",
  "riscv 0.10.0",
- "riscv-rt",
+ "riscv-rt 0.10.0",
 ]
 
 [[package]]
@@ -377,7 +382,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8149334f67011146f603c58b63f5b370ae71eb9700988fde89a6d5a6cd5987ea"
 dependencies = [
  "riscv 0.10.0",
- "riscv-rt",
+ "riscv-rt 0.10.0",
  "riscv-target",
 ]
 
@@ -389,6 +394,18 @@ checksum = "7818495e5392d1ebb158a6f65da26c23d7f0fe93f7d6affa6395bf5b77035eae"
 dependencies = [
  "r0",
  "riscv 0.9.0",
+ "riscv-rt-macros",
+ "riscv-target",
+]
+
+[[package]]
+name = "riscv-rt"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "102c52c89defde24dedf9ac077cc69df77b85aa2400dd2d5aad6eea6a6a5c089"
+dependencies = [
+ "r0",
+ "riscv 0.10.0",
  "riscv-rt-macros",
  "riscv-target",
 ]
