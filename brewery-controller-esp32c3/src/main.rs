@@ -56,6 +56,7 @@ const MAX31865_REFERENCE_RESISTANCE_OHMS: u32 = 4300;
 #[riscv_rt::entry]
 fn main() -> ! {
     esp_logger::init_logger(log::LevelFilter::Trace);
+    info!("Controller initializing...");
 
     let peripherals = Peripherals::take().unwrap();
     let mut system = peripherals.SYSTEM.split();
@@ -164,8 +165,8 @@ fn main() -> ! {
     let temperature_ready = io.pins.gpio4.into_pull_up_input();
     let io_expander_ready = io.pins.gpio3.into_pull_up_input();
     
-    let mut target_temp_ssr_pin = io.pins.gpio5.into_push_pull_output();
-    let mut power_percent_ssr_pin = io.pins.gpio9.into_push_pull_output();
+    let mut target_temp_ssr_pin = io.pins.gpio9.into_push_pull_output();
+    let mut power_percent_ssr_pin = io.pins.gpio5.into_push_pull_output();
     target_temp_ssr_pin.set_drive_strength(DriveStrength::I5mA);
     power_percent_ssr_pin.set_drive_strength(DriveStrength::I5mA);
   
@@ -197,7 +198,7 @@ fn main() -> ! {
     devices.initialize(&clocks).unwrap();
 
     // Execute the main run loop
-    let run_result = devices.run();
+    let run_result = devices.run(&clocks);
 
     // We aren't processing interrupts anymore, disable them
     unsafe { riscv::interrupt::disable(); }
@@ -296,7 +297,7 @@ where
         
         // Read the data in order to reset DRDY. The data is stale from some
         // other session, so just discard it.
-        self.temperature_device.read_temperature()?;
+        self.temperature_device.read_temperature(&mut Delay::new(clocks))?;
         
         // Same for the IO expander, to reset its interrupt pin
         self.io_expander.read()?;
@@ -312,7 +313,7 @@ where
         Ok(())
     } 
 
-    fn run(&mut self) -> Result<(), DeviceError<TErr, DErr, IErr>> {
+    fn run(&mut self, clocks: &Clocks) -> Result<(), DeviceError<TErr, DErr, IErr>> {
         // Once stopped, do not allow a restart
         if self.run != 0 {
             return Err(DeviceError::DoubleRun);
@@ -337,12 +338,13 @@ where
             
                 if self.power_percent_rotary.update(data, now) {
                     Self::show_value(&mut self.power_percent_rotary, &mut self.power_percent_display)?;
+                    self.target_temp_ssr.set_power_percent(100 - self.power_percent_rotary.value() as u32);
                     self.power_percent_ssr.set_power_percent(self.power_percent_rotary.value() as u32);
                 }
             }
             
             if self.temperature_ready.is_low()? {
-                let temp = self.temperature_device.read_temperature()?;
+                let temp = self.temperature_device.read_temperature(&mut Delay::new(clocks))?;
 
                 if stats.add_sample(temp) {
                     // Enough samples were gathered to update the temperature

@@ -44,6 +44,7 @@ const CMD_READ: u8 = 0b0000_0000;
 const CMD_WRITE: u8 = 0b1000_0000;
 const CONFIG_REGISTER: u8 = 0x00;
 const RTD_MSB_REGISTER: u8 = 0x01;
+const FAULT_STATUS_REGISTER: u8 = 0x07;
 const CMD_WRITE_CONFIG: u8 = CMD_WRITE | CONFIG_REGISTER;
 const CMD_READ_RTD_MSB: u8 = CMD_READ | RTD_MSB_REGISTER;
 // The base configuration enables 3-wire RTD (as opposed to 2- or 4-wire)
@@ -52,11 +53,18 @@ const BASE_CONFIG: u8 = 0b0001_0000;
 const ENABLE_VBIAS: u8 = 0b1000_0000;
 const CLEAR_FAULT: u8 = 0b0000_0010;
 const ENABLE_AUTO_CONVERSION: u8 = 0b0100_0000;
+const AUTO_FAULT_CYCLE: u8 = 0b1000_0100;
+
+// The fault status register value corresponding to an over/undervoltage fault
+const OVERUNDERVOLTAGE_FAULT: u8 = 0b0000_0100;
 
 // The time in milliseconds between re-enabling VBias and when conversions can
 // be made. 10ms is the maximum assuming the maximum (10k) reference resistor is
 // used. For smaller resistors this will be less (e.g. 5ms for a 4.3k resistor).
 const VBIAS_SETTLE_TIME_MS: u32 = 10;
+
+// The time in milliseconds to wait for the fault detection cycle to complete.
+const FAULT_CYCLE_WAIT_TIME_MS: u32 = 100;
 
 // The resistance of the RTD at the freezing point of water.
 // For a PT1000 device this is 1000.
@@ -84,7 +92,7 @@ pub trait Max31865ReadWrite {
     
     /// Reads the conversion data from the device and converts it to a
     /// temperature in °F. Only accurate for temperatures 32°F and above.
-    fn read_temperature(&mut self) -> Result<f32, Max31865Error<Self::Error>>;
+    fn read_temperature<E, DELAY: DelayUs<Error = E>>(&mut self, delay: &mut DELAY) -> Result<f32, Max31865Error<Self::Error>>;
 }
 
 /// Driver for the MAX31865
@@ -161,17 +169,42 @@ impl<SPI: SpiBus> Max31865ReadWrite for Max31865<SPI> {
         self.spi.transfer_in_place(&mut [CMD_WRITE_CONFIG, CONFIG]).map_err(Max31865Error::Spi)
     }
 
-    fn read_temperature(&mut self) -> Result<f32, Max31865Error<Self::Error>> {
+    fn read_temperature<E, DELAY: DelayUs<Error = E>>(&mut self, delay: &mut DELAY) -> Result<f32, Max31865Error<Self::Error>> {
         // data[0] is the command to read starting at the RTD_MSB register.
         // The remaining 2 bytes are to receive the data at that register and
         // the one following it, RTD_LSB.
         let data = &mut [CMD_READ_RTD_MSB, 0x00, 0x00];
         self.spi.transfer_in_place(data).map_err(Max31865Error::Spi)?;
 
+        /*
         // The lowest bit of the LSB is a fault flag
         if data[2] & 0x01 == 0x01 {
-            return Err(Max31865Error::RtdFault);
+            warn!("Fault bit set on RTD read");
+            
+            // Run the fault detection cycle
+            let data = &mut [CMD_WRITE_CONFIG, AUTO_FAULT_CYCLE];
+            self.spi.transfer_in_place(data).map_err(Max31865Error::Spi)?;
+            delay.delay_ms(FAULT_CYCLE_WAIT_TIME_MS).map_err(|_| Max31865Error::Delay)?;
+
+            let data = &mut [FAULT_STATUS_REGISTER, 0x00];
+            self.spi.transfer_in_place(data).map_err(Max31865Error::Spi)?;
+            let faultcode = data[1];
+            warn!("Fault Code: 0b{:b}", faultcode);
+
+            // Ignore over/undervoltage faults because they are spurious and
+            // can happen when touching the RTD to a different ground reference
+            // (e.g metal equipment), even though the voltage difference is
+            // very small.
+            if faultcode == OVERUNDERVOLTAGE_FAULT {
+                info!("Ignoring over/undervoltage fault");
+                // Clear the fault status
+                const CONFIG: u8 = BASE_CONFIG | ENABLE_VBIAS | ENABLE_AUTO_CONVERSION | CLEAR_FAULT;
+                self.spi.transfer_in_place(&mut [CMD_WRITE_CONFIG, CONFIG]).map_err(Max31865Error::Spi)?;
+            } else {
+                return Err(Max31865Error::RtdFault);
+            }
         }
+        */
 
         // Combine the RTD_MSB and RTD_LSB into a single value
         let raw_reading = (data[1] as u16) << 8 | data[2] as u16;
@@ -227,7 +260,7 @@ mod tests {
         spi.expect_transfer_in_place(&[0x01, 0, 0], &[0, 0b0100_0000, 0b0000_0000]);
 
         let mut device = Max31865::new(spi, 4000);
-        let temperature = device.read_temperature().unwrap();
+        let temperature = device.read_temperature(&mut MockDelay).unwrap();
     
         assert_eq!(temperature, 32.0);
     

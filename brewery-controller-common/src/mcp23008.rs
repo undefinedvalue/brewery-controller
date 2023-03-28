@@ -291,9 +291,6 @@ where
         let data = &mut [0u8; 3];
         self.i2c.write_read(self.address, &[INTF_REGISTER], data)?;
 
-        let x = data[2];
-        info!("{x}");
-
         Ok(Mcp23008Data {
             interrupts: data[0],
             interrupt_capture: data[1],
