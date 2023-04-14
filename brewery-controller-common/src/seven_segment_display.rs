@@ -1,52 +1,13 @@
 use core::cmp::min;
 
 use embedded_hal::i2c::I2c;
-use crate::ht16k33::{HT16K33, self};
+use crate::{ht16k33::{HT16K33, self}, common::ControllerResult};
 
 // Data required to show a negative sign on the 7-segment display
 const NEGATIVE_SIGN_DATA: u8 = 0b0100_0000;
 const MAX_DIGITS: usize = 4;
 // Default to maximum brightness
 const DEFAULT_DIMMING: u8 = 15;
-
-#[derive(Copy, Clone, Debug)]
-pub enum DisplayError<I2C> {
-    I2c(I2C),
-}
-
-impl<I2C> From<I2C> for DisplayError<I2C> {
-    fn from(value: I2C) -> Self {
-        Self::I2c(value)
-    }
-}
-
-pub trait SevenSegmentDisplayWrite {
-    type Error: core::fmt::Debug;
-
-    /// Initializes the display, but does not turn on the LEDs.
-    fn initialize(&mut self) -> Result<(), DisplayError<Self::Error>>;
-    
-    /// Sets how dim the display should be, where `dimming` is 0-15. 0 being
-    /// the most dim but still on.
-    fn set_dimming(&mut self, dimming: u8) -> Result<(), DisplayError<Self::Error>>;
-    
-    /// Enables/disables displaying the LEDs that are set to be on.
-    fn set_display_on(&mut self, on: bool) -> Result<(), DisplayError<Self::Error>>;
-    
-    /// Displays `str` as characters adapted for a 7-segment display.
-    /// Only digits, dash, and ASCII letters are supported. Letters K, M, Q, V,
-    /// W, X, and Z are not supported. Any unsupported characters will show as
-    /// blanks. Case of letters is ignored. If more characters are supplied than
-    /// the display can show, any extra characters will be ignored.
-    fn display_str(&mut self, str: &str) -> Result<(), DisplayError<Self::Error>>;
-    
-    /// Displays `n` as digits on the display. This handles showing the decimal
-    /// point and negative sign. It will prioritize showing the negative sign
-    /// and all integer digits over decimal digits, which will be rounded and
-    /// truncated to fit. If `n` is a number with more integer digits than will
-    /// fit on the display, display behavior is undefined but no error will occur.
-    fn display_digits(&mut self, n: f32) -> Result<(), DisplayError<Self::Error>>;
-}
 
 /// Display driver for the [Adafruit 7-segment HT16K33 Backpack](https://learn.adafruit.com/adafruit-led-backpack/0-dot-56-seven-segment-backpack).
 /// 
@@ -64,6 +25,7 @@ pub struct SevenSegmentDisplay<I2C> {
 impl<I2C, E> SevenSegmentDisplay<I2C>
 where
     I2C: I2c<Error = E>,
+    E: core::fmt::Debug,
 {
     /// Creates a new driver that will communicate using `i2c` as the I2C bus
     /// to a HT16K33 device at `address`. Valid addresses for the HT16K33 are
@@ -84,16 +46,9 @@ where
     pub fn destroy(self) -> I2C {
         self.device.destroy()
     }
-}
 
-impl<I2C, E> SevenSegmentDisplayWrite for SevenSegmentDisplay<I2C>
-where
-    I2C: I2c<Error = E>,
-    E: core::fmt::Debug,
-{
-    type Error = E;
-
-    fn initialize(&mut self) -> Result<(), DisplayError<Self::Error>> {
+    /// Initializes the display, but does not turn on the LEDs.
+    pub fn initialize(&mut self) -> ControllerResult<()> {
         self.device.initialize()?;
         self.set_dimming(DEFAULT_DIMMING)?;
         // Clear the display since it will show whatever was last stored
@@ -102,17 +57,25 @@ where
         Ok(())
     }
 
-    fn set_dimming(&mut self, dimming: u8) -> Result<(), DisplayError<Self::Error>> {
+    /// Sets how dim the display should be, where `dimming` is 0-15. 0 being
+    /// the most dim but still on.
+    pub fn set_dimming(&mut self, dimming: u8) -> ControllerResult<()> {
         self.device.set_dimming(dimming)?;
         Ok(())
     }
 
-    fn set_display_on(&mut self, on: bool) -> Result<(), DisplayError<Self::Error>> {
+    /// Enables/disables displaying the LEDs that are set to be on.
+    pub fn set_display_on(&mut self, on: bool) -> ControllerResult<()> {
         self.device.set_display_on(on)?;
         Ok(())
     }
 
-    fn display_str(&mut self, str: &str) -> Result<(), DisplayError<Self::Error>> {
+    /// Displays `str` as characters adapted for a 7-segment display.
+    /// Only digits, dash, and ASCII letters are supported. Letters K, M, Q, V,
+    /// W, X, and Z are not supported. Any unsupported characters will show as
+    /// blanks. Case of letters is ignored. If more characters are supplied than
+    /// the display can show, any extra characters will be ignored.
+    pub fn display_str(&mut self, str: &str) -> ControllerResult<()> {
         let display_data = &mut [0u8; ht16k33::DISPLAY_DATA_LENGTH];
         let mut position = 0;
 
@@ -130,7 +93,12 @@ where
         Ok(())
     }
 
-    fn display_digits(&mut self, n: f32) -> Result<(), DisplayError<Self::Error>> {
+    /// Displays `n` as digits on the display. This handles showing the decimal
+    /// point and negative sign. It will prioritize showing the negative sign
+    /// and all integer digits over decimal digits, which will be rounded and
+    /// truncated to fit. If `n` is a number with more integer digits than will
+    /// fit on the display, display behavior is undefined but no error will occur.
+    pub fn display_digits(&mut self, n: f32) -> ControllerResult<()> {
         // The negative sign takes up a digit
         let max_digits = if n < 0f32 {
             MAX_DIGITS - 1

@@ -63,6 +63,10 @@ where
         }
     }
 
+    pub fn power_percent(&self) -> u32 {
+        self.power_percent
+    }
+
     pub fn set_power_percent(&mut self, power_percent: u32) {
         self.power_percent = power_percent;
         self.update_next_toggle_time();
@@ -84,17 +88,15 @@ where
         }
     }
 
-    #[allow(unused_must_use)]
     fn set_low(&mut self) {
         // Ignore errors since it is Infallible
-        self.control_pin.set_low();
+        self.control_pin.set_low().unwrap_or_default();
         self.curr_state = false;
     }
 
-    #[allow(unused_must_use)]
     fn set_high(&mut self) {
         // Ignore errors since it is Infallible
-        self.control_pin.set_high();
+        self.control_pin.set_high().unwrap_or_default();
         self.curr_state = true;
     }
 }

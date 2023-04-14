@@ -22,6 +22,8 @@
 
 use embedded_hal::i2c::I2c;
 
+use crate::{common::ControllerResult, reason};
+
 /// The number of addressable rows supported by the device.
 pub const N_ROWS: usize = 16;
 /// The number of addressable commons supported by the device.
@@ -45,7 +47,8 @@ pub struct HT16K33<I2C> {
 
 impl<I2C, E> HT16K33<I2C>
 where
-    I2C: I2c<Error = E>
+    I2C: I2c<Error = E>,
+    E: core::fmt::Debug,
 {
     /// Creates a new driver that will communicate using `i2c` as the I2C bus
     /// to the device at `address`. Valid addresses for the HT16K33 are 7 bits
@@ -61,27 +64,21 @@ where
     }
 
     /// Turns on the devices's oscillator, which is the first step in enabling it.
-    pub fn initialize(&mut self) -> Result<(), E> {
+    pub fn initialize(&mut self) -> ControllerResult<()> {
         self.write_one(SYSTEM_SETUP_REGISTER | SYSTEM_SETUP_ENABLE_OSCILLATOR)
-    }
-
-    /// Consumes `self` and returns the `i2c` that it owned so it can be reused.
-    #[cfg(test)]
-    pub fn destroy(self) -> I2C {
-        self.i2c
     }
 
     /// Sets the dimming on the device. The HT16K33 supports blinking modes with
     /// this setting, but this always sets blinking to off.
     /// `dimming` is 0-15. Only the lowest 4 bits will be used.
     /// `dimming` = 0 is the lowest level, but is not off
-    pub fn set_dimming(&mut self, dimming: u8) -> Result<(), E> {
+    pub fn set_dimming(&mut self, dimming: u8) -> ControllerResult<()> {
         self.write_one(DIMMING_REGISTER | (dimming & 0b1111)) 
     }
 
     /// Causes the device to enable/disable displaying LEDs if they are set
     /// in its display data.
-    pub fn set_display_on(&mut self, on: bool) -> Result<(), E> {
+    pub fn set_display_on(&mut self, on: bool) -> ControllerResult<()> {
         if on {
             self.write_one(DISPLAY_REGISTER | DISPLAY_ON)
         } else {
@@ -100,7 +97,7 @@ where
     /// 
     /// So by setting byte 0 to 0b0001_0001, the LEDs connected to (ROW0, COM0)
     /// and (ROW4, COM0) will be turned on.
-    pub fn set_display_data(&mut self, data: &[u8; DISPLAY_DATA_LENGTH])  -> Result<(), E> {
+    pub fn set_display_data(&mut self, data: &[u8; DISPLAY_DATA_LENGTH])  -> ControllerResult<()> {
         let mut bytes = [0u8; DISPLAY_DATA_LENGTH + 1];
         bytes[0] = DISPLAY_DATA_START_REGISTER;
 
@@ -108,12 +105,24 @@ where
             bytes[i] = data[i - 1];
         }
 
-        self.i2c.write(self.address, &bytes)
+        reason!(
+            self.i2c.write(self.address, &bytes),
+            "Error during i2c.write in HT16K33::set_display_data"
+        )
     }
 
     /// Helper to write a single byte to the device
-    fn write_one(&mut self, byte: u8) -> Result<(), E> {
-        self.i2c.write(self.address, &[byte])
+    fn write_one(&mut self, byte: u8) -> ControllerResult<()> {
+        reason!(
+            self.i2c.write(self.address, &[byte]),
+            "Error during i2c.write in HT16K33::write_one"
+        )
+    }
+
+    /// Consumes `self` and returns the `i2c` that it owned so it can be reused.
+    #[cfg(test)]
+    pub fn destroy(self) -> I2C {
+        self.i2c
     }
 }
 

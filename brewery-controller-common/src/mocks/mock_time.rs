@@ -1,6 +1,4 @@
-use embedded_hal::delay::DelayUs;
-
-use crate::common::time::{Duration, Instant, RealTimeClock, self};
+use crate::common::time::{Duration, Instant, RealTimeClock, self, Delay};
 
 pub struct MockTime {
     now: Instant,
@@ -23,12 +21,8 @@ impl RealTimeClock for MockTime {
 }
 
 pub struct MockDelay;
-impl DelayUs for MockDelay {
-    type Error = core::convert::Infallible;
-
-    fn delay_us(&mut self, _us: u32) -> Result<(), Self::Error> {
-        Ok(())
-    }
+impl Delay for MockDelay {
+    fn delay(&self, _: Duration) {}
 }
 
 #[cfg(test)]

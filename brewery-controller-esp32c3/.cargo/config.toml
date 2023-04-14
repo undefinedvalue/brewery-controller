@@ -6,9 +6,11 @@ target = "riscv32imc-unknown-none-elf"
 rustflags = [
   # Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)
   # NOTE: May negatively impact performance of produced code
-  "-C", "force-frame-pointers",
+  #"-C", "force-frame-pointers",
 
   "-C", "link-arg=-Tlinkall.x",
+  # Required for esp-wifi
+  #"-C", "link-arg=-Trom_functions.x",
 ]
 
 [unstable]

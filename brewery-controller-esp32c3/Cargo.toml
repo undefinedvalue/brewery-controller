@@ -5,15 +5,58 @@ authors = ["Anna"]
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[profile.dev]
+# Required for esp-wifi
+lto = "off"
+
+[profile.release]
+# Required for esp-wifi
+lto = "off"
+
+[profile.dev.package.esp-wifi]
+opt-level = 3
+
+[features]
+#default = ["server", "calibration"]
+default = ["calibration"]
+calibration = []
+# When enabling server feature, also uncomment the rom_functions.x link arg in config.toml
+server = [
+    "dep:critical-section",
+    "dep:embassy-executor",
+    "dep:embassy-net",
+    "dep:embassy-sync",
+    "dep:embassy-time",
+    "dep:esp-wifi",
+    "dep:futures-util",
+    "dep:heapless",
+    "dep:smoltcp"
+]
+
 [dependencies]
-critical-section = { version = "1.1.1" }
+embassy-futures = { version = "0.1.0" }
 embedded-hal = { version = "=1.0.0-alpha.9" }
-esp32c3-hal = { git = "https://github.com/esp-rs/esp-hal", features = ["eh1"] }
-esp-backtrace = { version = "0.5.0", features = ["esp32c3", "panic-handler", "exception-handler", "print-uart"] }
+embedded-io = { version = "0.4.0" }
+embedded-svc = { version = "^0.23.2", default-features = false, features = [] }
+esp32c3-hal = { version = "0.8.0", features = ["eh1", "embassy", "embassy-time-timg0"] }
+#esp-backtrace = { version = "0.6.0", features = ["esp32c3", "panic-handler", "exception-handler", "print-uart"] }
 esp-println = { version = "0.4.0", default-features = false, features = ["esp32c3", "uart"] }
 log = { version = "0.4.17", default-features = false }
-shared-bus = { version = "0.2.5", features = ["eh-alpha"] }
+libm = { version = "0.2.6" }
 riscv = { version = "0.10.0" }
-riscv-rt = { version = "0.11.0" }
+shared-bus = { version = "0.2.5", features = ["eh-alpha"] }
+static_cell = { version = "1.0.0" }
+panic-halt = { version = "0.2.0" }
 
 brewery-controller-common = { path = "../brewery-controller-common" }
+
+# Optional dependencies required for the the server feature
+critical-section = { version = "1.1.1", optional = true }
+embassy-executor  = { package = "embassy-executor", git = "https://github.com/embassy-rs/embassy/", rev = "cd9a65b", features = ["nightly", "integrated-timers"], optional = true }
+embassy-net = { git = "https://github.com/embassy-rs/embassy", rev = "26474ce6eb759e5add1c137f3417845e0797df3a", features = ["nightly", "tcp", "udp", "dhcpv4", "medium-ethernet"], optional = true }
+embassy-sync = {version = "0.1.0", optional = true }
+embassy-time = { version = "0.1.0", features = ["nightly"], optional = true }
+esp-wifi = { git = "https://github.com/esp-rs/esp-wifi", rev = "74e9f18", features = ["esp32c3", "wifi", "embedded-svc", "async", "embassy-net"], optional = true }
+futures-util = { version = "0.3.17", default-features = false, optional = true }
+heapless = { version = "0.7.16", default-features = false, optional = true }
+smoltcp = { version = "0.9.1", default-features=false, features = [], optional = true }

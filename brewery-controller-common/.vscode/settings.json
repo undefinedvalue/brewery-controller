@@ -11,4 +11,5 @@
             "cmd": "cargo test"
         },
     ],
+    "rust-analyzer.showUnlinkedFileNotification": false,
 }

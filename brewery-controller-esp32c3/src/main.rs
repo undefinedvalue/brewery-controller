@@ -1,48 +1,59 @@
 #![no_std]
 #![no_main]
+#![feature(type_alias_impl_trait)]
+#![feature(never_type)]
 
-use core::convert::Infallible;
+#[cfg(feature = "server")]
+use embassy_executor::Executor;
+#[cfg(feature = "server")]
+use esp32c3_hal::{embassy, Rng};
+#[cfg(feature = "server")]
+mod server;
 
-use embedded_hal::{i2c::I2c, digital::{OutputPin, InputPin}};
 use esp32c3_hal::{
-    clock::Clocks,
-    clock::ClockControl,
-    dma::DmaPriority,
-    gdma::Gdma,
-    i2c::I2C,
-    interrupt,
-    pac::{self, Peripherals},
+    clock::{ClockControl, Clocks, CpuClock},
+    dma::{DmaPriority, ChannelTx, ChannelRx},
+    gdma::{Gdma, Channel0TxImpl, Channel0RxImpl, SuitablePeripheral0, Channel0},
+    gpio::{DriveStrength, GpioPin, Input, PullUp, Bank0GpioRegisterAccess, SingleCoreInteruptStatusRegisterAccessBank0, InputOutputAnalogPinType, Gpio4Signals, InputOutputPinType, Gpio5Signals, Output, PushPull, Gpio19Signals},
+    peripherals::{Peripherals, I2C0, SPI2},
     prelude::*,
-    spi::{dma::WithDmaSpi2, Spi, SpiMode},
+    spi::{dma::{WithDmaSpi2, SpiDma}, Spi, SpiMode, FullDuplexMode},
     systimer::SystemTimer,
     timer::TimerGroup,
-    Delay, Rtc, IO,
-    gpio::DriveStrength,
+    Rtc,
+    IO, peripheral::Peripheral
 };
-use esp_backtrace as _;
+//use esp_backtrace as _;
+use panic_halt as _;
+use shared_bus::{BusManagerSimple, I2cProxy, NullMutex};
+use static_cell::StaticCell;
+
 #[allow(unused_imports)]
 use log::{debug, error, info, trace, warn};
-use shared_bus::BusManagerSimple;
 
 use brewery_controller_common::{
-    common::time::{Instant, RealTimeClock},
-    max31865::{Max31865, Max31865ReadWrite, Max31865Error},
-    mcp23008::{Mcp23008, Mcp23008ReadWrite, Pin, InterruptTrigger, Mcp23008Error},
+    common::{ControllerError, ControllerResult},
+    common::time::{Instant, RealTimeClock, Duration},
+    max31865::Max31865,
+    pid::Pid,
+    pid::PidConfig,
     rotary_encoder::RotaryEncoder,
-    seven_segment_display::{SevenSegmentDisplay, SevenSegmentDisplayWrite, DisplayError},
+    seven_segment_display::SevenSegmentDisplay,
     solid_state_relay::SolidStateRelay,
+    temperature_stats::{Calibration, TemperatureStats},
 };
 
 mod esp_logger;
 
 const TEMP_MAX_DEC_PLACES: usize = 1;
 const ROTARY_DISPLAY_MAX_DEC_PLACES: usize = 0;
+const TARGET_TEMP_ROTARY_ADDR: u8 = 0x36;
 const TEMP_DISP_ADDR: u8 = 0x72;
 const TARGET_TEMP_DISP_ADDR: u8 = 0x70;
+const POWER_PERCENT_ROTARY_ADDR: u8 = 0x37;
 const POWER_DISP_ADDR: u8 = 0x71;
-const MCP23008_ADDR: u8 = 0x20;
 
-const TARGET_TEMP_MIN: i32 = 70;
+const TARGET_TEMP_MIN: i32 = 50;
 const TARGET_TEMP_MAX: i32 = 212;
 const TARGET_TEMP_DEFAULT: i32 = TARGET_TEMP_MIN;
 
@@ -52,15 +63,53 @@ const POWER_PERCENT_DEFAULT: i32 = POWER_PERCENT_MIN;
 
 const MAX31865_REFERENCE_RESISTANCE_OHMS: u32 = 4300;
 
+const DEVICE_UPDATE_INTERVAL: Duration = Duration::millis(100);
+const PID_UPDATE_INTERVAL: Duration = Duration::millis(1000);
+#[cfg(feature = "server")]
+const SERVER_UPDATE_INTERVAL: Duration = Duration::millis(1000);
+
+const INITIAL_PID_CONFIG: PidConfig = PidConfig {
+    controller_gain: 0.5,
+    integral_time: 540.0,
+    derivative_time: 14.0,
+};
+
+// Data is generated at 60Hz, so 60 samples represents a 1 second window of data
+const N_TEMP_SAMPLES: usize = 60;
+#[cfg(feature = "calibration")]
+const RTD_CALIBRATION: [Calibration; 0] = [];
+#[cfg(not(feature = "calibration"))]
+const RTD_CALIBRATION: [Calibration; 7] = [
+    Calibration { actual: 53.9, expected: 53.0 },
+    Calibration { actual: 72.4, expected: 72.0 },
+    Calibration { actual: 99.3, expected: 99.3 },
+    Calibration { actual: 119.5, expected: 120.0 },
+    Calibration { actual: 149.4, expected: 150.0 },
+    Calibration { actual: 166.8, expected: 167.8 },
+    Calibration { actual: 210.6, expected: 211.5 },
+];
+const N_CALIBRATIONS: usize = RTD_CALIBRATION.len();
+
+#[cfg(feature = "server")]
+static EXECUTOR: StaticCell<Executor> = StaticCell::new();
+
+static CLOCKS: StaticCell<Clocks> = StaticCell::new();
+static I2C_BUS: StaticCell<BusManagerSimple<esp32c3_hal::i2c::I2C<I2C0>>> = StaticCell::new();
+static SPI_TX_DESCRIPTORS: StaticCell<[u32; 24]> = StaticCell::new();
+static SPI_RX_DESCRIPTORS: StaticCell<[u32; 24]> = StaticCell::new();
+
 #[allow(non_snake_case)]
-#[riscv_rt::entry]
+#[entry]
 fn main() -> ! {
-    esp_logger::init_logger(log::LevelFilter::Trace);
+    esp_logger::init_logger(log::LevelFilter::Info);
     info!("Controller initializing...");
 
-    let peripherals = Peripherals::take().unwrap();
+    let peripherals = Peripherals::take();
     let mut system = peripherals.SYSTEM.split();
-    let clocks = ClockControl::boot_defaults(system.clock_control).freeze();
+    let clocks = CLOCKS.init_with(|| {
+        ClockControl::configure(system.clock_control, CpuClock::Clock160MHz).freeze()
+    });
+    let delay = Delay { clocks };
 
     // Disable the RTC and TIMG watchdog timers
     let mut rtc = Rtc::new(peripherals.RTC_CNTL);
@@ -76,7 +125,7 @@ fn main() -> ! {
 
     let io = IO::new(peripherals.GPIO, peripherals.IO_MUX);
 
-    let i2c = I2C::new(
+    let i2c = esp32c3_hal::i2c::I2C::new(
         peripherals.I2C0,
         io.pins.gpio1,
         io.pins.gpio0,
@@ -85,24 +134,9 @@ fn main() -> ! {
         &clocks,
     );
 
-    let i2c_bus = BusManagerSimple::new(i2c);
+    let i2c_bus = I2C_BUS.init_with(|| BusManagerSimple::new(i2c));
 
-    let mut io_expander = new_io_expander(i2c_bus.acquire_i2c(), MCP23008_ADDR);
-    io_expander.initialize().unwrap();
-
-    let mut ioexp_config = io_expander.configuration();
-    ioexp_config.set_interrupt_input_pin(Pin::GPIO0, true, InterruptTrigger::AnyEdge);
-    ioexp_config.set_interrupt_input_pin(Pin::GPIO1, true, InterruptTrigger::AnyEdge);
-    ioexp_config.set_interrupt_input_pin(Pin::GPIO2, true, InterruptTrigger::AnyEdge);
-    ioexp_config.set_interrupt_input_pin(Pin::GPIO3, true, InterruptTrigger::AnyEdge);
-    ioexp_config.set_interrupt_input_pin(Pin::GPIO4, true, InterruptTrigger::AnyEdge);
-    ioexp_config.set_interrupt_input_pin(Pin::GPIO5, true, InterruptTrigger::AnyEdge);
-    io_expander.set_configuration(ioexp_config).unwrap();
-
-
-    let mut tx_descriptors = [0u32; 8 * 3];
-    let mut rx_descriptors = [0u32; 8 * 3];
-
+    info!("MAX31865 SPI temperature device initializing...");
     let temperature_device = {
         // Use SPI with DMA because that seems to be the only SPI implementation
         // that actually works.
@@ -111,9 +145,9 @@ fn main() -> ! {
 
         let spi = Spi::new(
             peripherals.SPI2,
-            io.pins.gpio6, // clk
-            io.pins.gpio7, // mosi
-            io.pins.gpio2, // miso
+            io.pins.gpio6,  // clk
+            io.pins.gpio7,  // mosi
+            io.pins.gpio2,  // miso
             io.pins.gpio10, // cs
             5u32.MHz(),
             SpiMode::Mode3,
@@ -122,64 +156,64 @@ fn main() -> ! {
         )
         .with_dma(gdma_channel.configure(
             false,
-            &mut tx_descriptors,
-            &mut rx_descriptors,
+            SPI_TX_DESCRIPTORS.init_with(|| [0u32; 24]),
+            SPI_RX_DESCRIPTORS.init_with(|| [0u32; 24]),
             DmaPriority::Priority0,
         ));
 
-        Max31865::new(spi, MAX31865_REFERENCE_RESISTANCE_OHMS)
+        Max31865::new(spi, delay, MAX31865_REFERENCE_RESISTANCE_OHMS)
     };
 
-    let temperature_display = new_display(
+    let temperature_display = SevenSegmentDisplay::new(
         i2c_bus.acquire_i2c(),
         TEMP_DISP_ADDR,
         TEMP_MAX_DEC_PLACES
     );
 
     let target_temp_rotary = RotaryEncoder::new(
-        Pin::GPIO3,
-        Pin::GPIO4,
+        i2c_bus.acquire_i2c(),
+        TARGET_TEMP_ROTARY_ADDR,
+        delay,
         TARGET_TEMP_MIN,
         TARGET_TEMP_MAX,
         TARGET_TEMP_DEFAULT,
     );
-    let target_temp_display = new_display(
+    let target_temp_display = SevenSegmentDisplay::new(
         i2c_bus.acquire_i2c(),
         TARGET_TEMP_DISP_ADDR,
-        ROTARY_DISPLAY_MAX_DEC_PLACES
+        ROTARY_DISPLAY_MAX_DEC_PLACES,
     );
 
     let power_percent_rotary = RotaryEncoder::new(
-        Pin::GPIO0,
-        Pin::GPIO1,
+        i2c_bus.acquire_i2c(),
+        POWER_PERCENT_ROTARY_ADDR,
+        delay,
         POWER_PERCENT_MIN,
         POWER_PERCENT_MAX,
         POWER_PERCENT_DEFAULT,
     );
-    let power_percent_display = new_display(
+    let power_percent_display = SevenSegmentDisplay::new(
         i2c_bus.acquire_i2c(),
         POWER_DISP_ADDR,
-        ROTARY_DISPLAY_MAX_DEC_PLACES
+        ROTARY_DISPLAY_MAX_DEC_PLACES,
     );
 
     let temperature_ready = io.pins.gpio4.into_pull_up_input();
-    let io_expander_ready = io.pins.gpio3.into_pull_up_input();
-    
-    let mut target_temp_ssr_pin = io.pins.gpio9.into_push_pull_output();
-    let mut power_percent_ssr_pin = io.pins.gpio5.into_push_pull_output();
+
+    // GPIO 18 and 19 default to using USB signals, ignoring any output we set.
+    // https://github.com/esp-rs/esp-hal/issues/279
+    peripherals.USB_DEVICE.conf0.modify(|_,w| w.usb_pad_enable().clear_bit());
+
+    let mut target_temp_ssr_pin = io.pins.gpio5.into_push_pull_output();
+    let mut power_percent_ssr_pin = io.pins.gpio19.into_push_pull_output();
     target_temp_ssr_pin.set_drive_strength(DriveStrength::I5mA);
     power_percent_ssr_pin.set_drive_strength(DriveStrength::I5mA);
-  
+
     let target_temp_ssr = SolidStateRelay::new(target_temp_ssr_pin, Time);
     let power_percent_ssr = SolidStateRelay::new(power_percent_ssr_pin, Time);
-  
-    interrupt::enable(pac::Interrupt::GPIO, interrupt::Priority::Priority3).unwrap();
-
-    unsafe { riscv::interrupt::enable(); }
 
     let mut devices = Devices {
         temperature_ready,
-        io_expander_ready,
         temperature_device,
         temperature_display,
         target_temp_rotary,
@@ -188,176 +222,263 @@ fn main() -> ! {
         power_percent_rotary,
         power_percent_display,
         power_percent_ssr,
-        io_expander,
-        run: 0,
     };
 
     // Delay to allow connected devices to turn on
-    Delay::new(&clocks).delay_ms(500u32);
+    //delay.delay(Duration::millis(500));
 
-    devices.initialize(&clocks).unwrap();
+    info!("Initializing devices...");
+    devices.initialize().unwrap();
 
-    // Execute the main run loop
-    let run_result = devices.run(&clocks);
+    #[cfg(feature = "server")]
+    {
+        let mut rng = Rng::new(peripherals.RNG);
+        let seed = (rng.random() as u64) << 32 | rng.random() as u64;
+        esp_wifi::init_heap();
 
-    // We aren't processing interrupts anymore, disable them
-    unsafe { riscv::interrupt::disable(); }
+        esp_wifi::initialize(
+            SystemTimer::new(peripherals.SYSTIMER).alarm0,
+            rng,
+            system.radio_clock_control,
+            &clocks,
+        )
+        .unwrap();
 
-    match run_result {
-        Ok(_) => {
-            // Just turn off the displays and do nothing
-            devices.turn_off_normal();
-            info!("Turned off");
-            loop {};
-        },
-        Err(err) => {
-            // Show an error code on the displays and panic
-            devices.turn_off_error();
-            panic!("Fatal error in run: {:?}", err);
-        },
+
+        embassy::init(&clocks, timer_group0.timer0);
+
+        let executor = EXECUTOR.init_with(Executor::new);
+        executor.run(|spawner| {
+            spawner.must_spawn(server::run_server_task(
+                spawner,
+                seed,
+                peripherals.RADIO,
+            ));
+            spawner.must_spawn(run_devices_task(devices));
+        });
+    }
+
+    #[cfg(not(feature = "server"))]
+    {
+        run_devices(devices);
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-enum DeviceError<SPI, I2CA, I2CB> {
-    Temperature(Max31865Error<SPI>),
-    Display(DisplayError<I2CA>),
-    IoExpander(Mcp23008Error<I2CB>),
-    DoubleRun,
+#[cfg(feature = "server")]
+#[embassy_executor::task]
+async fn run_devices_task(mut devices: Devices<'static>) -> ! {
+    // Execute the main run loop. It only returns if there is an error.
+    let run_result = devices.run().await;
+
+    devices.turn_off_error();
+    panic!("Fatal error in run: {:?}", run_result.err());
 }
 
-impl<SPI, I2CA, I2CB> From<Max31865Error<SPI>> for DeviceError<SPI, I2CA, I2CB>
-{
-    fn from(value: Max31865Error<SPI>) -> DeviceError<SPI, I2CA, I2CB> {
-        Self::Temperature(value)
-    }
+#[cfg(not(feature = "server"))]
+fn run_devices(mut devices: Devices<'_>) -> ! {
+    // Execute the main run loop. It only returns if there is an error.
+    let run_result = embassy_futures::block_on(devices.run());
+
+    // Show an error code on the displays and panic
+    devices.turn_off_error();
+    panic!("Fatal error in run: {:?}", run_result.err());
 }
 
-impl<SPI, I2CA, I2CB> From<DisplayError<I2CA>> for DeviceError<SPI, I2CA, I2CB>
-{
-    fn from(value: DisplayError<I2CA>) -> DeviceError<SPI, I2CA, I2CB> {
-        Self::Display(value)
-    }
+type I2C<'a> = I2cProxy<'a, NullMutex<esp32c3_hal::i2c::I2C<'a, <I2C0 as Peripheral>::P>>>;
+type Pin<D, T, S, const N: u8> = GpioPin<D, Bank0GpioRegisterAccess, SingleCoreInteruptStatusRegisterAccessBank0, T, S, N>;
+type Pin4<D> = Pin<D, InputOutputAnalogPinType, Gpio4Signals, 4>;
+type Pin5<D> = Pin<D, InputOutputAnalogPinType, Gpio5Signals, 5>;
+type Pin19<D> = Pin<D, InputOutputPinType, Gpio19Signals, 19>;
+
+#[derive(PartialEq)]
+enum UpdateState {
+    TargetTempRotary,
+    TargetTempDisplay,
+    PowerPercentRotary,
+    PowerPercentDisplay,
+    TemperatureDisplay,
 }
 
-impl<SPI, I2CA, I2CB> From<Mcp23008Error<I2CB>> for DeviceError<SPI, I2CA, I2CB>
-{
-    fn from(value: Mcp23008Error<I2CB>) -> DeviceError<SPI, I2CA, I2CB> {
-        Self::IoExpander(value)
-    }
+struct Devices<'a> {
+    temperature_ready: Pin4<Input<PullUp>>,
+    temperature_device: Max31865<SpiDma<'a, SPI2, ChannelTx<'a, Channel0TxImpl, Channel0>, ChannelRx<'a, Channel0RxImpl, Channel0>, SuitablePeripheral0, FullDuplexMode>, Delay>,
+    temperature_display: SevenSegmentDisplay<I2C<'a>>,
+    target_temp_rotary: RotaryEncoder<I2C<'a>, Delay>,
+    target_temp_display: SevenSegmentDisplay<I2C<'a>>,
+    target_temp_ssr: SolidStateRelay<Pin5<Output<PushPull>>, Time>,
+    power_percent_rotary: RotaryEncoder<I2C<'a>, Delay>,
+    power_percent_display: SevenSegmentDisplay<I2C<'a>>,
+    power_percent_ssr: SolidStateRelay<Pin19<Output<PushPull>>, Time>,
 }
 
-impl<SPI, I2CA, I2CB> From<Infallible> for DeviceError<SPI, I2CA, I2CB>
-{
-    fn from(_: Infallible) -> DeviceError<SPI, I2CA, I2CB> {
-        unreachable!()
-    }
-}
-
-struct Devices<TR, IR, T, D, I, S1, S2>
-where
-    TR: InputPin,
-    IR: InputPin,
-    T: Max31865ReadWrite,
-    D: SevenSegmentDisplayWrite,
-    I: Mcp23008ReadWrite,
-    S1: OutputPin,
-    S2: OutputPin,
-{
-    temperature_ready: TR,
-    io_expander_ready: IR,
-    temperature_device: T,
-    temperature_display: D,
-    target_temp_rotary: RotaryEncoder,
-    target_temp_display: D,
-    target_temp_ssr: SolidStateRelay<S1, Time>,
-    power_percent_rotary: RotaryEncoder,
-    power_percent_display: D,
-    power_percent_ssr: SolidStateRelay<S2, Time>,
-    io_expander: I,
-    run: u32,
-}
-
-impl<TR, IR, T, D, I, S1, S2, TErr, DErr, IErr> Devices<TR, IR, T, D, I, S1, S2>
-where
-    TR: InputPin<Error = Infallible>,
-    IR: InputPin<Error = Infallible>,
-    T: Max31865ReadWrite<Error = TErr>,
-    D: SevenSegmentDisplayWrite<Error = DErr>,
-    I: Mcp23008ReadWrite<Error = IErr>,
-    S1: OutputPin<Error = Infallible>,
-    S2: OutputPin<Error = Infallible>,
-{
-    fn initialize(&mut self, clocks: &Clocks) -> Result<(), DeviceError<TErr, DErr, IErr>> {
+impl Devices<'_> {
+    fn initialize(&mut self) -> ControllerResult<()> {
         self.target_temp_ssr.initialize();
         self.power_percent_ssr.initialize();
 
-        self.temperature_device.initialize(&mut Delay::new(clocks))?;
+        self.target_temp_rotary.initialize().unwrap();
+        self.power_percent_rotary.initialize().unwrap();
+
+        self.temperature_device.initialize()?;
         self.temperature_device.start_auto_conversions()?;
-        
+
         // Read the data in order to reset DRDY. The data is stale from some
         // other session, so just discard it.
-        self.temperature_device.read_temperature(&mut Delay::new(clocks))?;
-        
-        // Same for the IO expander, to reset its interrupt pin
-        self.io_expander.read()?;
-        
+        self.temperature_device.read_temperature()?;
+
         // Initialize and turn on the displays
         self.temperature_display.initialize()?;
         self.target_temp_display.initialize()?;
         self.power_percent_display.initialize()?;
 
-        Self::show_value(&mut self.target_temp_rotary, &mut self.target_temp_display)?;
-        Self::show_value(&mut self.power_percent_rotary, &mut self.power_percent_display)?;
+        Self::show_value(
+            &mut self.target_temp_rotary,
+            &mut self.target_temp_display
+        )?;
+        Self::show_value(
+            &mut self.power_percent_rotary,
+            &mut self.power_percent_display,
+        )?;
 
-        Ok(())
-    } 
-
-    fn run(&mut self, clocks: &Clocks) -> Result<(), DeviceError<TErr, DErr, IErr>> {
-        // Once stopped, do not allow a restart
-        if self.run != 0 {
-            return Err(DeviceError::DoubleRun);
-        }
-
-        self.run += 1;
-
-        let mut stats = TemperatureStats::new();
-
-        while self.run == 1 {
-            self.target_temp_ssr.update();
-            self.power_percent_ssr.update();
-
-            if self.io_expander_ready.is_low()? {
-                let data = self.io_expander.read()?;
-                let now = Time.now();
-                
-                if self.target_temp_rotary.update(data, now) {
-                    Self::show_value(&mut self.target_temp_rotary, &mut self.target_temp_display)?;
-                    //self.target_temp_ssr.set_power_percent(self.target_temp_rotary.value() as u32);
-                }
-            
-                if self.power_percent_rotary.update(data, now) {
-                    Self::show_value(&mut self.power_percent_rotary, &mut self.power_percent_display)?;
-                    self.target_temp_ssr.set_power_percent(100 - self.power_percent_rotary.value() as u32);
-                    self.power_percent_ssr.set_power_percent(self.power_percent_rotary.value() as u32);
-                }
-            }
-            
-            if self.temperature_ready.is_low()? {
-                let temp = self.temperature_device.read_temperature(&mut Delay::new(clocks))?;
-
-                if stats.add_sample(temp) {
-                    // Enough samples were gathered to update the temperature
-                    let temp = stats.temperature();
-                    self.temperature_display.display_digits(temp)?;
-                }
-            }
-        }
-    
         Ok(())
     }
 
-    fn show_value(rotary: &mut RotaryEncoder, display: &mut D) -> Result<(), DisplayError<D::Error>> {
+    async fn run(&mut self) -> Result<!, ControllerError> {
+        // Fetch the initial temperature for initializing the PID and stats
+        let initial_temp = loop {
+            if let Ok(true) = embedded_hal::digital::InputPin::is_low(&self.temperature_ready) {
+                break self.temperature_device.read_temperature()?;
+            }
+        };
+
+        let mut pid = Pid::new(initial_temp, INITIAL_PID_CONFIG);
+        let mut stats = TemperatureStats::<N_TEMP_SAMPLES, N_CALIBRATIONS>::new(initial_temp, &RTD_CALIBRATION);
+
+        info!("Running!");
+
+        // Stagger the updates of the devices, PID, and server
+        const INITIAL_UPDATE_STATE: UpdateState = UpdateState::TargetTempRotary;
+        let mut next_update = Time.now();
+        let mut update_state = INITIAL_UPDATE_STATE;
+        let mut next_pid_update = next_update + DEVICE_UPDATE_INTERVAL / 2;
+        #[cfg(feature = "server")]
+        let mut next_server_update = next_pid_update + DEVICE_UPDATE_INTERVAL / 4;
+
+        loop {
+            // Always update the SSRs since they need to maintain a PWM signal
+            self.target_temp_ssr.update();
+            self.power_percent_ssr.update();
+
+            // Always check the temperature_ready interrupt pin and record a new
+            // temperature sample if it is set.
+            if let Ok(true) = embedded_hal::digital::InputPin::is_low(&self.temperature_ready) {
+                stats.add_sample(self.temperature_device.read_temperature()?);
+            }
+
+            // Every so often, yield to the executor to allow the server task to
+            // run. Otherwise it won't ever run since this task never awaits.
+            #[cfg(feature = "server")]
+            embassy_futures::yield_now().await;
+
+            let now = Time.now();
+
+            // Only update one device per loop iteration in order to minimize
+            // the time taken per iteration.
+            if now >= next_update {
+                update_state = match update_state {
+                    UpdateState::TargetTempRotary => {
+                        if let Ok(true) = self.target_temp_rotary.update() {
+                            UpdateState::TargetTempDisplay
+                        } else {
+                            UpdateState::PowerPercentRotary
+                        }
+                    },
+                    UpdateState::TargetTempDisplay => {
+                        Self::show_value(&mut self.target_temp_rotary, &mut self.target_temp_display)?;
+                        UpdateState::PowerPercentRotary
+                    },
+                    UpdateState::PowerPercentRotary => {
+                        if let Ok(true) = self.power_percent_rotary.update() {
+                            let value = self.power_percent_rotary.value();
+                            self.power_percent_ssr.set_power_percent(value as u32);
+                            UpdateState::PowerPercentDisplay
+                        } else {
+                            UpdateState::TemperatureDisplay
+                        }
+                    },
+                    UpdateState::PowerPercentDisplay => {
+                        Self::show_value(&mut self.power_percent_rotary, &mut self.power_percent_display)?;
+                        UpdateState::TemperatureDisplay
+                    }
+                    UpdateState::TemperatureDisplay => {
+                        self.temperature_display.display_digits(stats.temperature())?;
+                        INITIAL_UPDATE_STATE
+                    },
+
+                };
+            
+                if update_state == INITIAL_UPDATE_STATE {
+                    next_update += DEVICE_UPDATE_INTERVAL;
+                }
+            }
+
+            // Update the PID and use its output to set the target temp SSR
+            if now >= next_pid_update {
+                next_pid_update += PID_UPDATE_INTERVAL;
+
+                #[cfg(feature = "server")]
+                {
+                    let pid_config = critical_section::with(|cs| {
+                        server::PID_CONFIG.borrow(cs).get()
+                    });
+                    
+                    pid.set_config(pid_config);
+                }
+
+                // Update the PID controller and target temp SSR
+                let value = self.target_temp_rotary.value();
+                pid.set_setpoint(value as f32);
+
+                if value <= self.target_temp_rotary.min() {
+                    pid.disable();
+                } else if !pid.enabled() {
+                    pid.enable(value as f32);
+                }
+            
+                // Send the sample to the PID controller to determine the
+                // appropriate power for the target temperature SSR.
+                // The output will be 0 if it is not enabled.
+                let pid_output = pid.control(stats.temperature());
+                let power_percent = libm::roundf(pid_output * 100.0) as u32;
+            
+                if power_percent != self.target_temp_ssr.power_percent() {
+                    self.target_temp_ssr.set_power_percent(power_percent);
+                }
+            }
+
+            // Periodically send data to the server
+            #[cfg(feature = "server")]
+            if now >= next_server_update {
+                next_server_update += SERVER_UPDATE_INTERVAL;
+
+                let data = server::DisplayData {
+                    time: now.duration_since_epoch().to_millis(),
+                    temperature: stats.temperature(),
+                    setpoint: pid.setpoint(),
+                    power1: self.target_temp_ssr.power_percent(),
+                    power2: self.power_percent_ssr.power_percent(),
+                    pid: pid.config(),
+                };
+
+                server::DATA_SIGNAL.signal(data);
+            }
+        }
+    }
+
+    fn show_value(
+        rotary: &mut RotaryEncoder<I2C, Delay>,
+        display: &mut SevenSegmentDisplay<I2C>,
+    ) -> ControllerResult<()> {
         let value = rotary.value();
 
         if value <= rotary.min() {
@@ -367,56 +488,24 @@ where
         }
     }
 
-    #[allow(dead_code)]
-    fn stop(&mut self) {
-        self.run += 1;
-    }
-
-    fn turn_off_normal(mut self) {
-        self.target_temp_ssr.turn_off();
-        self.power_percent_ssr.turn_off();
-
-        // Ignore errors while turning the display off
-        self.temperature_display.set_display_on(false).unwrap_or_default();
-        
-        Self::set_to_min(&mut self.power_percent_rotary);
-        Self::set_to_min(&mut self.target_temp_rotary);
-        self.target_temp_display.set_display_on(false).unwrap_or_default();
-        self.power_percent_display.set_display_on(false).unwrap_or_default();
-    }
-
     fn turn_off_error(mut self) {
         self.target_temp_ssr.turn_off();
         self.power_percent_ssr.turn_off();
 
         // Ignore errors while displaying. Hopefully one of the displays works.
-        self.temperature_display.display_str("Err").unwrap_or_default();
-        
-        Self::set_to_min(&mut self.power_percent_rotary);
-        Self::set_to_min(&mut self.target_temp_rotary);
-        self.target_temp_display.display_str("Err").unwrap_or_default();
-        self.power_percent_display.display_str("Err").unwrap_or_default();
+        self.temperature_display
+            .display_str("Err")
+            .unwrap_or_default();
+
+        self.target_temp_rotary.set_to_min();
+        self.power_percent_rotary.set_to_min();
+        self.target_temp_display
+            .display_str("Err")
+            .unwrap_or_default();
+        self.power_percent_display
+            .display_str("Err")
+            .unwrap_or_default();
     }
-
-    fn set_to_min(rotary: &mut RotaryEncoder) {
-        rotary.force_set_value(rotary.min());
-    }
-}
-
-fn new_display<I2C, E>(i2c: I2C, address: u8, max_decimal_places: usize) -> impl SevenSegmentDisplayWrite
-where
-    I2C: I2c<Error = E>,
-    E: core::fmt::Debug,
-{
-    SevenSegmentDisplay::new(i2c, address, max_decimal_places)
-}
-
-fn new_io_expander<I2C, E>(i2c: I2C, address: u8) -> impl Mcp23008ReadWrite
-where
-    I2C: I2c<Error = E>,
-    E: core::fmt::Debug,
-{
-    Mcp23008::new(i2c, address)
 }
 
 struct Time;
@@ -427,43 +516,31 @@ impl RealTimeClock for Time {
     }
 }
 
-struct TemperatureStats {
-    // Data is generated at 60Hz, so 60 samples represents one second of data
-    samples: [f32; 16],
-    sample_idx: usize,
-    temperature: f32,
+#[derive(Copy, Clone)]
+struct Delay {
+    clocks: &'static Clocks<'static>
 }
 
-impl TemperatureStats {
-    fn new() -> Self {
-        Self {
-            samples: [0f32; 16],
-            sample_idx: 0,
-            temperature: 0f32,
-        }
-    }
+impl Delay {
+    fn delay(&self, duration: Duration) {
+        let mut delay = esp32c3_hal::Delay::new(self.clocks);
 
-    fn temperature(&self) -> f32 {
-        self.temperature
-    }
-
-    fn add_sample(&mut self, temperature: f32) -> bool {
-        self.samples[self.sample_idx] = temperature;
-        self.sample_idx = (self.sample_idx + 1) % self.samples.len();
-
-        if self.sample_idx == 0 {
-            let mut sum = 0f32;
-
-            for i in 0..self.samples.len() {
-                sum += self.samples[i];
-            }
-
-            let prev_temp = self.temperature;
-            self.temperature = sum / self.samples.len() as f32;
+        let micros = duration.to_micros();
+        let ms = micros / 1000;
+        let us = micros % 1000;
         
-            self.temperature != prev_temp
-        } else {
-            false
+        if ms > 0 {
+            embedded_hal::delay::DelayUs::delay_ms(&mut delay, ms as u32).unwrap_or_default();
         }
+
+        if us > 0 {
+            embedded_hal::delay::DelayUs::delay_us(&mut delay, us as u32).unwrap_or_default();
+        }
+    }
+}
+
+impl brewery_controller_common::common::time::Delay for Delay {
+    fn delay(&self, duration: Duration) {
+        Delay::delay(&self, duration);
     }
 }
