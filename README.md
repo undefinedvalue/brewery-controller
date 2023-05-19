@@ -1,7 +1,7 @@
 # brewery-controller
 
 A temperature controller for my home brewery. It consists of:
-* An ESP32-C3 microcontroller (which is running this repository's code).
+* An ESP32-C3 microcontroller (which is running this repository's code). I use a ESP32-C3-DevKitC-02, but any ESP32-C3 should work if it makes the right pins available.
 * Three 4-digit 7-segment displays, each run by an [HT16K33](https://cdn-shop.adafruit.com/datasheets/ht16K33v110.pdf) LED driver.
 * A 3-wire PT1000 RTD (resistance temperature detector).
 * A [MAX31865](https://www.analog.com/media/en/technical-documentation/data-sheets/max31865.pdf) RTD resistance-to-digital converter.
@@ -13,7 +13,7 @@ A temperature controller for my home brewery. It consists of:
 The three 7-segment displays show:
 * The RTD's temperature (in degrees Fahrenheit) to one decimal place.
 * A "power percent" integer value between 0 and 100, which can be changed using one of the rotary encoders.
-* A "target temperature" integer value between 70 and 212, which can be changed using the other rotary encoder.
+* A "target temperature" integer value between 50 and 212, which can be changed using the other rotary encoder.
 
 The displays and the rotary encoders all share the same I2C bus. The MAX31865 is on its own SPI bus and uses an additional interrupt pin to notify the microcontroller when readings are ready. This allows temperature readings at the MAX31865's maximum rate of 60Hz.
 
